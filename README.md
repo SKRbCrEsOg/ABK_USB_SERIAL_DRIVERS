@@ -30,9 +30,12 @@ USB 转串口（USB-Serial）驱动**以及 **CDC-ACM 类驱动（覆盖 ST-Link
 > ST-Link/V3 会把自身暴露成 CDC-ACM 虚拟串口，因此本模块通过启用
 > `CONFIG_USB_ACM=m`（`cdc-acm.ko`）来提供支持。
 
-> **CH343**：`ch343.c` 并不在 AOSP GKI（`kernel/common`）中。本模块会在树内
-> 存在源码/Kconfig 时才启用它；如果不存在会打印警告并跳过，而不是让整个构建
-> 失败。需要 CH343 时可自行向内核树回移植 `ch343.c` 后再启用本模块。
+> **CH343（内置驱动）**：`ch343.c` **不在** AOSP GKI（`kernel/common`）中，因此
+> 本模块自带 WCH 官方驱动源码 `files/drivers/ch343.c`（`ch343.h`），当内核树
+> 缺失时注入到 `drivers/usb/serial/`，并补齐 Makefile 链接与 Kconfig 符号后以
+> `CONFIG_USB_SERIAL_CH343=m` 构建。若树内已存在 `ch343.c`（例如厂商内核已回移），
+> 默认**保留树内版本**，不覆盖；如需强制覆盖设置 `ABK_USB_SERIAL_FORCE_INJECT=1`。
+> WCH 驱动本身通过 `LINUX_VERSION_CODE` 适配 5.10～6.12，无需按内核线拆分。
 
 > **依赖模块**：启用 `option` 或 `qcserial` 时，Kconfig 会自动
 > `select USB_SERIAL_WWAN`，产出 `usb_wwan.ko`。本模块会自动把它一并收集进
@@ -40,9 +43,10 @@ USB 转串口（USB-Serial）驱动**以及 **CDC-ACM 类驱动（覆盖 ST-Link
 
 ## 支持的内核线
 
-ABK 支持 5.10 / 5.15 / 6.1 / 6.6 / 6.12。模块不注入任何驱动源码，直接使用内核
-树内已有源码，因此不会跨版本混用。内核版本从 `$KERNEL_ROOT/common/Makefile`
-的 `VERSION`/`PATCHLEVEL` 读取，读取失败时回退到 `ABK_BUILD_KERNEL_VERSION`。
+ABK 支持 5.10 / 5.15 / 6.1 / 6.6 / 6.12。除内置的 CH343 驱动外，其余驱动直接
+使用内核树内已有源码；CH343 使用 WCH 官方版本自适应源码。内核版本从
+`$KERNEL_ROOT/common/Makefile` 的 `VERSION`/`PATCHLEVEL` 读取，读取失败时回退到
+`ABK_BUILD_KERNEL_VERSION`。
 
 ## 目录结构
 
@@ -50,6 +54,10 @@ ABK 支持 5.10 / 5.15 / 6.1 / 6.6 / 6.12。模块不注入任何驱动源码，
 ABK_USB_SERIAL_DRIVERS/
 ├── setup.sh                      # ABK 入口脚本（已 chmod +x）
 ├── module.conf                   # 模块元数据
+├── files/
+│   └── drivers/
+│       ├── ch343.c               # WCH 官方 CH343/CH342/CH344... 驱动（GPL-2.0+）
+│       └── ch343.h
 └── scripts/
     ├── libabk.sh                 # ABK 通用工具函数
     └── usb_serial_drivers.sh     # 核心启用逻辑
@@ -59,7 +67,7 @@ ABK_USB_SERIAL_DRIVERS/
 
 | 阶段 | 行为 |
 | --- | --- |
-| `after_patch` | 定位 `drivers/usb/serial` → 校验 usbserial 核心 → 逐个启用驱动为 `=m` → 写 `$DEFCONFIG` → 更新 `modules.bzl` → 导出 `.ko` 列表 → 校验 |
+| `after_patch` | 定位 `drivers/usb/serial` → 校验 usbserial 核心 → 注入 CH343 驱动（缺失时）→ 逐个启用驱动为 `=m` → 写 `$DEFCONFIG` → 更新 `modules.bzl` → 导出 `.ko` 列表 → 校验 |
 | `before_build` | 空操作（配置已在 `after_patch` 完成） |
 
 ## 在 ABK 中填写
@@ -116,20 +124,25 @@ post-fs-data.sh          # 开机 insmod
 4. 校验 `usb-serial.c` / `generic.c` / `bus.c` 存在（缺失直接失败）。
 5. 确保 `obj-$(CONFIG_USB_SERIAL) += usbserial.o` 与
    `usbserial-y := usb-serial.o generic.o bus.o`（缺失时追加）。
-6. `$DEFCONFIG` 写入（幂等）`CONFIG_USB_SERIAL=y`、`CONFIG_USB_SERIAL_GENERIC=y`。
-7. 逐个驱动：源码与 Kconfig 符号都存在时写入 `CONFIG_<SYMBOL>=m`，否则警告跳过。
-8. 处理隐藏依赖模块（如 `option`/`qcserial` 触发的 `usb_wwan.ko`）。
-9. 更新 `$KERNEL_ROOT/common/modules.bzl`：删除 `usbserial.ko`，追加启用的驱动与依赖模块。
-10. 导出 `ABK_EXTERNAL_MODULE_KO_LIST`。
-11. 校验上述所有改动确实落地。
+6. CH343：树内缺失 `ch343.c` 时注入 `files/drivers/ch343.{c,h}`，并补齐
+   `obj-$(CONFIG_USB_SERIAL_CH343) += ch343.o` 与 `config USB_SERIAL_CH343`。
+7. `$DEFCONFIG` 写入（幂等）`CONFIG_USB_SERIAL=y`、`CONFIG_USB_SERIAL_GENERIC=y`。
+8. 逐个驱动：源码与 Kconfig 符号都存在时写入 `CONFIG_<SYMBOL>=m`，否则警告跳过。
+9. 处理隐藏依赖模块（如 `option`/`qcserial` 触发的 `usb_wwan.ko`）。
+10. 更新 `$KERNEL_ROOT/common/modules.bzl`：删除 `usbserial.ko`，追加启用的驱动与依赖模块。
+11. 导出 `ABK_EXTERNAL_MODULE_KO_LIST`。
+12. 校验上述所有改动确实落地。
 
 ## 安全设计
 
-1. **不注入驱动源码**：只使用内核树内已有驱动，避免跨版本混用与许可证/来源问题。
-2. **不覆盖树内文件**：除 `defconfig`、`drivers/usb/serial/Makefile`（仅在缺失
-   链接行时追加）与 `modules.bzl` 外不修改驱动源码。
-3. **幂等**：配置先删旧行再追加；Makefile 只在缺失时插入；`modules.bzl` 只在
-   缺失时添加。
+1. **仅内置 CH343 驱动**：除 CH343（AOSP GKI 没有、由 WCH 官方源码补齐）外，
+   其余驱动一律使用内核树内已有源码，避免跨版本混用。
+2. **不覆盖树内文件**：树内已存在 `ch343.c` 时默认保留；确需覆盖才设置
+   `ABK_USB_SERIAL_FORCE_INJECT=1`。除 `defconfig`、`drivers/usb/serial/Makefile`
+   （仅在缺失链接行时追加）、`drivers/usb/serial/Kconfig`（仅在缺失符号时插入）
+   与 `modules.bzl` 外不修改其它文件；覆盖前会备份为 `*.abk.bak`。
+3. **幂等**：配置先删旧行再追加；Makefile/Kconfig 只在缺失时插入；注入前先比较
+   内容，一致则跳过；`modules.bzl` 只在缺失时添加。
 4. **防错**：`set -euo pipefail`；定位、核心校验、写入后校验任一失败都会
    `exit 1`，构建立即中断，避免产出坏内核。
 5. **阶段顺序**：`after_patch` 在编译内核之前，配置改动会被 `build/build.sh`
@@ -154,16 +167,24 @@ touch "$ser/usb-serial.c" "$ser/generic.c" "$ser/bus.c" \
 printf 'config USB_ACM\n\ttristate "ACM"\n' > "$cls/Kconfig"
 touch "$cls/cdc-acm.c"
 printf 'CONFIG_TTY=y\n' > "$tmp/common/arch/arm64/configs/gki_defconfig"
+printf '_COMMON_GKI_MODULES_LIST = [\n    "drivers/usb/serial/usbserial.ko",\n]\n' \
+  > "$tmp/common/modules.bzl"
 
 export KERNEL_ROOT="$tmp" DEFCONFIG="$tmp/common/arch/arm64/configs/gki_defconfig"
 export CUSTOM_EXTERNAL_MODULE_STAGE=after_patch
-bash setup.sh   # 第一次
+bash setup.sh   # 第一次（会注入 ch343.c/ch343.h）
 bash setup.sh   # 第二次应为幂等
-grep -n 'USB_SERIAL\|USB_ACM' "$DEFCONFIG"
-grep -c '\.ko' "$tmp/common/modules.bzl" 2>/dev/null || true
+grep -n 'USB_SERIAL\|USB_ACM' "$DEFCONFIG"        # 应包含 CH343=m
+test -f "$ser/ch343.c" && echo "ch343 injected"
+grep -n 'USB_SERIAL_CH343\|ch343' "$ser/Makefile" "$ser/Kconfig"
+grep -c '\.ko' "$tmp/common/modules.bzl"
 ```
 
 ## 许可证
 
-本模块整体以 **GPL-2.0** 发布，完整协议文本见 [`LICENSE`](LICENSE)。模块不包含
-任何第三方驱动源码，仅修改内核树内已有文件的配置。
+本模块整体以 **GPL-2.0** 发布，完整协议文本见 [`LICENSE`](LICENSE)。内置的
+`files/drivers/ch343.c`、`files/drivers/ch343.h` 来自 WCH 官方
+[`WCHSoftGroup/ch343ser_linux`](https://github.com/WCHSoftGroup/ch343ser_linux)
+（`SPDX-License-Identifier: GPL-2.0+`），保持上游内容不变；来源与许可证说明见
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。其余驱动不打包源码，仅修改
+内核树内已有文件的配置。

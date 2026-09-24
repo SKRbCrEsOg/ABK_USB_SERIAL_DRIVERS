@@ -42,6 +42,29 @@ abk_common_dir() {
   printf '%s/common\n' "$KERNEL_ROOT"
 }
 
+# abk_install_file <source> <target>
+# Copies a bundled file into the kernel tree. Idempotent: skips when the target
+# already matches byte-for-byte, backs up a differing target once.
+abk_install_file() {
+  local src="$1"
+  local dst="$2"
+
+  abk_require_file "$src"
+
+  if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+    abk_log "unchanged: $dst"
+    return 0
+  fi
+
+  if [ -f "$dst" ] && [ ! -f "$dst.abk.bak" ]; then
+    cp -f "$dst" "$dst.abk.bak"
+    abk_log "backup: $dst -> $dst.abk.bak"
+  fi
+
+  install -D -m 0644 "$src" "$dst"
+  abk_log "installed: $src -> $dst"
+}
+
 # abk_export_env <name> <value>
 # Persists a variable to $GITHUB_ENV so later workflow steps (e.g. the ABK
 # kernel-module packaging step) can read it. No-op outside GitHub Actions.
@@ -171,4 +194,42 @@ abk_bzl_add_module() {
 
   sed -i "${opener}a\\    \"$entry\"," "$bzl"
   abk_log "modules.bzl += $entry"
+}
+
+# abk_kconfig_insert_after <file> <ere-pattern> <block-file>
+abk_kconfig_insert_after() {
+  local file="$1"
+  local pattern="$2"
+  local block="$3"
+  local tmp
+
+  tmp="$(mktemp)"
+  awk -v pat="$pattern" -v blk="$block" '
+    { print }
+    !done && $0 ~ pat {
+      while ((getline line < blk) > 0) print line
+      close(blk)
+      done = 1
+    }
+  ' "$file" > "$tmp"
+  mv "$tmp" "$file"
+}
+
+# abk_kconfig_insert_before <file> <ere-pattern> <block-file>
+abk_kconfig_insert_before() {
+  local file="$1"
+  local pattern="$2"
+  local block="$3"
+  local tmp
+
+  tmp="$(mktemp)"
+  awk -v pat="$pattern" -v blk="$block" '
+    !done && $0 ~ pat {
+      while ((getline line < blk) > 0) print line
+      close(blk)
+      done = 1
+    }
+    { print }
+  ' "$file" > "$tmp"
+  mv "$tmp" "$file"
 }

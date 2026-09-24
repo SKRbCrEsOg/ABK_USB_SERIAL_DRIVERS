@@ -124,6 +124,77 @@ abk_usb_serial_ensure_core() {
   fi
 }
 
+# Directory holding bundled driver sources shipped by this module.
+abk_usb_serial_files_dir() {
+  printf '%s/files\n' "$MODULE_DIR"
+}
+
+# CH343 is not part of AOSP GKI, so bundle the WCH driver and inject it only
+# when the tree has none. An in-tree ch343.c is always preserved by default.
+abk_usb_serial_install_ch343() {
+  local dir="$1"
+  local files target force
+
+  force="${ABK_USB_SERIAL_FORCE_INJECT:-0}"
+  files="$(abk_usb_serial_files_dir)"
+  target="$dir/ch343.c"
+
+  if [ -f "$target" ] && [ "$force" != "1" ]; then
+    abk_log "in-tree ch343 driver kept: $target (set ABK_USB_SERIAL_FORCE_INJECT=1 to overwrite)"
+    return 0
+  fi
+
+  abk_install_file "$files/drivers/ch343.c" "$dir/ch343.c"
+  abk_install_file "$files/drivers/ch343.h" "$dir/ch343.h"
+}
+
+abk_usb_serial_ensure_ch343_makefile() {
+  local dir="$1"
+  local makefile="$dir/Makefile"
+
+  abk_require_file "$makefile"
+
+  if ! grep -Eq '^[[:space:]]*obj-\$\(CONFIG_USB_SERIAL_CH343\)' "$makefile"; then
+    abk_append_line_once "$makefile" 'obj-$(CONFIG_USB_SERIAL_CH343)		+= ch343.o'
+  else
+    abk_log "Makefile already links ch343.o"
+  fi
+}
+
+abk_usb_serial_ensure_ch343_kconfig() {
+  local dir="$1"
+  local kconfig="$dir/Kconfig"
+  local block
+
+  abk_require_file "$kconfig"
+
+  if abk_kconfig_has_config "$kconfig" USB_SERIAL_CH343; then
+    abk_log "Kconfig already defines USB_SERIAL_CH343"
+    return 0
+  fi
+
+  block="$(mktemp)"
+  cat > "$block" <<'EOF'
+config USB_SERIAL_CH343
+	tristate "USB WCH CH342/CH343/CH344/CH910x/CH9143/CH347 serial driver"
+	help
+	  Say Y here if you want to use WCH CH342/CH343/CH344/CH346/CH347/
+	  CH339/CH9101/CH9102/CH9103/CH9104/CH9105/CH9143/CH9111/CH9114
+	  USB to UART chips through the dedicated VCP driver.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called ch343.
+
+EOF
+  if grep -Eq '^[[:space:]]*endif.*USB_SERIAL' "$kconfig"; then
+    abk_kconfig_insert_before "$kconfig" '^[[:space:]]*endif.*USB_SERIAL' "$block"
+  else
+    cat "$block" >> "$kconfig"
+  fi
+  rm -f "$block"
+  abk_log "injected config USB_SERIAL_CH343 into $kconfig"
+}
+
 # Fail loudly if any expected change did not land.
 abk_usb_serial_verify() {
   local dir="$1"
@@ -188,6 +259,12 @@ abk_usb_serial_apply() {
 
   abk_usb_serial_require_core "$dir"
   abk_usb_serial_ensure_core "$dir"
+
+  # CH343 is not shipped by AOSP GKI: inject the bundled WCH driver so the
+  # driver-table entry below can enable it on every supported kernel line.
+  abk_usb_serial_install_ch343 "$dir"
+  abk_usb_serial_ensure_ch343_makefile "$dir"
+  abk_usb_serial_ensure_ch343_kconfig "$dir"
 
   # usbserial core stays built-in; device drivers are loadable modules.
   abk_set_config USB_SERIAL y "$DEFCONFIG"
