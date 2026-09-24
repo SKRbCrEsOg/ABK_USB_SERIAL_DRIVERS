@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# Shared helpers for the ABK USB serial drivers external module.
+# The public API mirrors the helpers used by the other ABK external modules
+# (abk_log / abk_die / abk_require_env / abk_set_config ...).
+
+abk_log() {
+  printf '[ABK usb-serial] %s\n' "$*"
+}
+
+abk_warn() {
+  printf '[ABK usb-serial][warn] %s\n' "$*" >&2
+}
+
+abk_die() {
+  printf '[ABK usb-serial][error] %s\n' "$*" >&2
+  exit 1
+}
+
+abk_require_env() {
+  local name
+  for name in "$@"; do
+    if [ -z "${!name:-}" ]; then
+      abk_die "required environment variable is empty: $name"
+    fi
+  done
+}
+
+abk_require_file() {
+  local path="$1"
+  [ -f "$path" ] || abk_die "required file not found: $path"
+}
+
+abk_require_dir() {
+  local path="$1"
+  [ -d "$path" ] || abk_die "required directory not found: $path"
+}
+
+abk_common_dir() {
+  abk_require_env KERNEL_ROOT
+  printf '%s/common\n' "$KERNEL_ROOT"
+}
+
+# abk_export_env <name> <value>
+# Persists a variable to $GITHUB_ENV so later workflow steps (e.g. the ABK
+# kernel-module packaging step) can read it. No-op outside GitHub Actions.
+abk_export_env() {
+  local name="$1"
+  local value="$2"
+
+  if [ -n "${GITHUB_ENV:-}" ] && [ -w "${GITHUB_ENV}" ]; then
+    printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
+    abk_log "exported $name to GITHUB_ENV"
+  else
+    abk_log "GITHUB_ENV unavailable; $name=$value (local run only)"
+  fi
+}
+
+# abk_ensure_trailing_newline <file>
+# Guarantees the file ends with a newline so appended lines do not merge with
+# the previous line.
+abk_ensure_trailing_newline() {
+  local file="$1"
+  [ -s "$file" ] || return 0
+  if [ "$(tail -c 1 "$file" | wc -l)" -eq 0 ]; then
+    printf '\n' >> "$file"
+  fi
+}
+
+# abk_append_line_once <file> <line>
+# Appends <line> only when it is not already present (exact match).
+abk_append_line_once() {
+  local file="$1"
+  local line="$2"
+
+  abk_require_file "$file"
+  if ! grep -Fqx -- "$line" "$file"; then
+    abk_ensure_trailing_newline "$file"
+    printf '%s\n' "$line" >> "$file"
+    abk_log "append line to $file: $line"
+  else
+    abk_log "line already present in $file: $line"
+  fi
+}
+
+# abk_config_line <symbol> <value>
+abk_config_line() {
+  local symbol="${1#CONFIG_}"
+  local value="$2"
+
+  case "$value" in
+    n) printf '# CONFIG_%s is not set\n' "$symbol" ;;
+    *) printf 'CONFIG_%s=%s\n' "$symbol" "$value" ;;
+  esac
+}
+
+# abk_set_config <symbol> <value> [file]
+# Removes any previous definition and appends the requested one. Idempotent.
+abk_set_config() {
+  local symbol="${1#CONFIG_}"
+  local value="$2"
+  local file="${3:-${DEFCONFIG:-}}"
+  local tmp
+
+  [ -n "$file" ] || abk_die "DEFCONFIG is empty and no config file was provided"
+  abk_require_file "$file"
+
+  tmp="$(mktemp)"
+  grep -v -E "^(CONFIG_${symbol}=|# CONFIG_${symbol} is not set$)" "$file" > "$tmp" || true
+  abk_ensure_trailing_newline "$tmp"
+  abk_config_line "$symbol" "$value" >> "$tmp"
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+
+  abk_log "set CONFIG_${symbol}=$value in $file"
+}
+
+abk_enable_config() {
+  abk_set_config "$1" y "${2:-${DEFCONFIG:-}}"
+}
+
+# abk_kconfig_has_config <file> <symbol>
+# Matches both "config SYMBOL" and "menuconfig SYMBOL" entries.
+abk_kconfig_has_config() {
+  local file="$1"
+  local symbol="$2"
+  grep -Eq "^[[:space:]]*(menuconfig|config)[[:space:]]+${symbol}([[:space:]]|$)" "$file"
+}
+
+# abk_bzl_remove_module <modules.bzl> <path/entry.ko>
+# Drops a "path/entry.ko" string from the GKI modules list. Used to drop
+# usbserial.ko once CONFIG_USB_SERIAL is built-in.
+abk_bzl_remove_module() {
+  local bzl="$1"
+  local entry="$2"
+
+  [ -f "$bzl" ] || return 0
+
+  if grep -qF "\"$entry\"" "$bzl"; then
+    sed -i "s|\"$entry\",*||g" "$bzl"
+    abk_log "modules.bzl removed $entry"
+  else
+    abk_log "modules.bzl already without $entry"
+  fi
+}
+
+# abk_bzl_add_module <modules.bzl> <path/entry.ko>
+# Ensures a "path/entry.ko" string is present in the GKI common modules list so
+# bazel/kleaf builds the new module. Idempotent.
+abk_bzl_add_module() {
+  local bzl="$1"
+  local entry="$2"
+  local opener
+
+  [ -f "$bzl" ] || return 0
+
+  if grep -qF "\"$entry\"" "$bzl"; then
+    abk_log "modules.bzl already lists $entry"
+    return 0
+  fi
+
+  opener="$(grep -nE '^[A-Za-z_]*GKI_MODULES_LIST[[:space:]]*=[[:space:]]*\[' "$bzl" | head -n1 | cut -d: -f1)"
+  if [ -z "$opener" ]; then
+    opener="$(grep -nE '^[A-Za-z_]*MODULES_LIST[[:space:]]*=[[:space:]]*\[' "$bzl" | head -n1 | cut -d: -f1)"
+  fi
+  if [ -z "$opener" ]; then
+    abk_warn "modules.bzl has no GKI modules list variable; cannot add $entry"
+    return 0
+  fi
+
+  sed -i "${opener}a\\    \"$entry\"," "$bzl"
+  abk_log "modules.bzl += $entry"
+}
