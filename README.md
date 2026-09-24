@@ -68,7 +68,7 @@ ABK_USB_SERIAL_DRIVERS/
 地址与阶段参数，多个模块用 `|` 分隔：
 
 ```text
-https://github.com/xhyyd2022/ABK_USB_SERIAL_DRIVERS;after_patch
+https://github.com/SKRbCrEsOg/ABK_USB_SERIAL_DRIVERS;after_patch
 ```
 
 - **阶段**：必须为 `after_patch`。
